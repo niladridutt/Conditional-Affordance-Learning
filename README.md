@@ -1,27 +1,8 @@
-:star2: We updated the repo with training code! :star2:
-
 ## Conditional Affordance Learning  ##
-#### In CoRL 2018 [[Paper]](https://arxiv.org/abs/1806.06498) [[Video]](https://www.youtube.com/watch?v=UtUbpigMgr0) [[Talk]](https://www.youtube.com/watch?v=SceH3Al9w_M)
+#### Initial code : https://github.com/xl-sr/CAL
+#### Reference [[Paper]](https://arxiv.org/abs/1806.06498) [[Video]](https://www.youtube.com/watch?v=UtUbpigMgr0) [[Talk]](https://www.youtube.com/watch?v=SceH3Al9w_M)
 
-[Axel Sauer<sup>1, 2</sup>](https://www.msrm.tum.de/rsi/team/wissenschaftliche-mitarbeiter/sauer-axel/), 
-[Nikolay Savinov<sup>1</sup>](http://people.inf.ethz.ch/nsavinov/), 
-[Andreas Geiger<sup>1, 3</sup>](https://ps.is.tuebingen.mpg.de/person/ageiger)
-<br/>
-<sup>1</sup> ETH Zurich, <sup>2</sup> TU Munich, <sup>3</sup> MPI for Intelligent Systems and University of Tubingen<br/>
 
-<p align="center">
-  <img src="CAL.gif" width="480">
-</p>
-
-If you use this implementation, please cite our CoRL 2018 paper.
-```
-@inproceedings{Sauer2018CORL,
-  author={Sauer, Axel and Savinov, Nikolay and Geiger, Andreas},
-  title={Conditional Affordance Learning for Driving in Urban Environments},
-  booktitle={Conference on Robot Learning (CoRL)},
-  year={2018}
-}
-```
 ### Installation
 
 ```Shell
