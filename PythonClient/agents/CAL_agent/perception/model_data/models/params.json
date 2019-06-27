@@ -1,0 +1,1 @@
+{"name": "test", "type_": "LSTM", "lr": 1e-4, "n_h": 100, "p": 0.27, "seq_len":10}

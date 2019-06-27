@@ -1,6 +1,5 @@
+from PIL import Image
 import os, math, time
-import scipy
-import tensorflow as tf
 import numpy as np
 from carla.agent import Agent
 from carla.carla_server_pb2 import Control
@@ -8,9 +7,9 @@ from carla.planner.map import CarlaMap
 import logging
 
 # own imports
-from plans import Centerlines
-from perception import CAL_network
-from controller import PID
+from .plans import Centerlines
+from .perception import CAL_network
+from .controller import PID
 
 # maximum steering angle, limited by the car model
 MAX_STEER = math.radians(35.0)
@@ -34,7 +33,7 @@ class VehicleState(object):
         self.speed_limit = 30
         self.direction = 0
         self.center_distance_GT = 0
-        self.image_hist = None
+        self.image_hist = []
         self.standing_to_long = False
 
 class Timer(object):
@@ -43,7 +42,7 @@ class Timer(object):
         self._refractory_time = False
 
     def in_refractory(self):
-	    return self._refractory_time
+        return self._refractory_time
 
     def elapsed_seconds(self):
         return time.time() - self._lap_time
@@ -61,12 +60,13 @@ class CAL(Agent):
         self._centerlines = Centerlines(city_name)
 
         # Agent Setup
-        Agent.__init__(self)        
-        self._neural_net = CAL_network()
-        self._seq_len = self._neural_net.model.max_input_shape
+        Agent.__init__(self)
+        self._net = CAL_network()
+        self._seq_len = 10
+        #self._seq_len = self._net.model.params[1].seq_len
         self._state = VehicleState()
         self._agents_present = False
-       
+
         # Controller setup
         param_path = os.path.dirname(__file__) + '/controller/params/'
         cruise_params = get_params_from_txt(param_path + 'cruise_params.txt')
@@ -93,12 +93,12 @@ class CAL(Agent):
     def run_step(self, measurements, sensor_data, carla_direction, target):
         # update the vehicle state
         self._state.speed = measurements.player_measurements.forward_speed*3.6
-        
+
         # get the current location and orientation of the agent in the world COS
         location, psi = self._get_location_and_orientation(measurements)
 
-	    # check if there are other cars or pedestrians present
-	    # speed up the benchmark, because we dont need to stop for red lights
+        # check if there are other cars or pedestrians present
+        # speed up the benchmark, because we dont need to stop for red lights
         self._agents_present = any([agent.HasField('vehicle') for agent in measurements.non_player_agents])
 
         # get the possible directions (at position of the front axle)
@@ -107,7 +107,6 @@ class CAL(Agent):
             directions_list_new = self._centerlines.get_directions(front_axle_pos)
         except:
             directions_list_new = {}
-
         # determine the current direction
         if directions_list_new:
             self._set_current_direction(directions_list_new, carla_direction)
@@ -118,23 +117,57 @@ class CAL(Agent):
         self._state.long_accel, self._state.lat_accel = self._get_accel(measurements, psi)
         ################################
 
+        with open("/home/self-driving/Desktop/CARLA_0.8.2/Indranil/CAL-master_copy_new/python_client/_benchmarks_results/latestData.csv","a+") as myf:
+            wrs=str(self._state.center_distance_GT)+","+str(self._state.long_accel)+","+str(self._state.lat_accel)+","+\
+                str(measurements.game_timestamp)+","+str(self._state.direction)
+            myf.write(wrs+"\n")
+
         # cycle the image sequence
-        new_im = sensor_data['CameraRGB'].data
-        if self._state.image_hist is None:
-            im0 = self._neural_net.preprocess_image(new_im, sequence=True)
-            self._state.image_hist = im0.repeat(self._seq_len, axis=1)
+        #new_im = sensor_data['CameraRGB'].data
+        new_im1 = sensor_data['CameraRGB0'].data #center
+        new_im2 = sensor_data['CameraRGB1'].data #left
+        new_im3 = sensor_data['CameraRGB2'].data #right
+        
+        #print('Type of image',type(new_im))
+        
+        new_im1 = Image.fromarray(new_im1)
+        new_im2 = Image.fromarray(new_im2)
+        new_im3 = Image.fromarray(new_im3)
+        images=[]
+        images.append(new_im2)
+        images.append(new_im1)
+        images.append(new_im3)
+
+        new_im = Image.new('RGB', (1200, 300))
+        x = 0
+        for i in range(3):
+	    new_im.paste(images[i], (x,0))
+	    x = x+ images[i].size[0]
+
+        new_im=np.asarray(new_im)
+        print('Image size',new_im.shape)
+        new_im = self._net.preprocess(new_im)
+        #new_im = new_im.unsqueeze(0)
+        print('Image size after preprocess',new_im.shape)
+        if not self._state.image_hist:
+            self._state.image_hist = [new_im]*self._seq_len
         else:
-            # get the newest entry
-            im0 = self._neural_net.preprocess_image(new_im, sequence=True)
-            # drop the oldelst entry
-            self._state.image_hist = self._state.image_hist[:,1:,:,:]
-            # add new entry
-            self._state.image_hist = np.concatenate((self._state.image_hist, im0), axis=1)
+            self._state.image_hist.pop(0)
+            self._state.image_hist.append(new_im)
+
+        print('Image history length',len(self._state.image_hist))
 
         # calculate the control
-        control = self._compute_action(carla_direction, self._state.direction)
+        control, prediction = self._compute_action(carla_direction, self._state.direction)
 
-        return control
+        return control,prediction
+
+    def getMetData(self):
+        tempDict = {}
+        tempDict['direction']= self._state.direction
+        tempDict['centerDist'] = self._state.center_distance_GT
+        tempDict['long_accel'], tempDict['lat_accel'] = self._state.long_accel, self._state.lat_accel
+        return tempDict
 
     def _set_current_direction(self, directions_list_new, carla_direction):
         if carla_direction == 3.0:
@@ -162,11 +195,11 @@ class CAL(Agent):
         if is_c1: self._centerlines.set_centerlines('c1')
         if is_c2: self._centerlines.set_centerlines('c2')
 
-    def _compute_action(self,carla_direction, direction):    
+    def _compute_action(self,carla_direction, direction):
         start = time.time()
         # Predict the intermediate representations
-        prediction = self._neural_net.predict(self._state.image_hist, [direction])
-        
+        prediction = self._net.predict(self._state.image_hist, direction)
+
         logging.info("Time for prediction: {}".format(time.time() - start))
         logging.info("CARLA Direction {}, Real Direction {}".format(carla_direction, direction))
 
@@ -179,7 +212,7 @@ class CAL(Agent):
         control.throttle, control.brake = self._longitudinal_control(prediction, direction)
         control.steer = self._lateral_control(prediction)
 
-        return control
+        return control, prediction
 
     def _longitudinal_control(self, prediction, direction) :
         """
@@ -210,26 +243,28 @@ class CAL(Agent):
         # optimal car following model
         following_speed = limit * (1-np.exp(-self.c/limit*veh_distance-self.d))
 
+        print('AGents',self._agents_present)
+        print('FOllowing',is_following)
         ### State machine
         if prediction['hazard_stop'][0] \
-        and prediction['hazard_stop'][1] > 0.9 \
+        and prediction['hazard_stop'][1] > 0.3 \
         and self._agents_present:
             state_name  = 'hazard_stop'
             prediction_proba = prediction['hazard_stop'][1]
             brake = 1
 
         elif prediction['red_light'][0] \
-        and prediction['red_light'][1] > 0.98 \
+        and prediction['red_light'][1] > 0.5 \
         and self._agents_present:
             state_name = 'red_light'
             prediction_proba = prediction['red_light'][1]
             throttle = 0
-            if speed > 5: 
+            '''if speed > 20:
                 # brake if driving to fast
-                brake = 0.8*(speed/30.0)
-            else: 
-                # fully brake if close to standing still            
-                brake = 1.0
+                brake = 1.0*(speed/20.0)
+            else:'''
+                # fully brake if close to standing still
+            brake = 1.0
 
         elif is_following and self._agents_present:
             state_name = 'following'
@@ -295,7 +330,7 @@ class CAL(Agent):
         # normalize delta
         delta /= MAX_STEER
 
-        # get delta sign, damping is calculed using the absolute delta
+        # get delta sign, damping is calculated using the absolute delta
         delta_sign = np.sign(delta)
         delta = abs(delta)
 

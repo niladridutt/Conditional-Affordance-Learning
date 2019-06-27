@@ -41,7 +41,12 @@ class Recording(object):
                                    'pos_y': -1,
                                    'steer': -1,
                                    'throttle': -1,
-                                   'brake': -1
+                                   'brake': -1,
+                                   'direction': -1,
+                                   'centerDist': -1,
+                                   'long_accel': -1,
+                                   'lat_accel': -1,
+                                   'gametimeStamp': -1
                                    }
 
         # Just in the case is the first time and there is no benchmark results folder
@@ -133,7 +138,7 @@ class Recording(object):
 
             w.writerow(self._dict_summary)
 
-    def write_measurements_results(self, experiment, rep, pose, reward_vec, control_vec):
+    def write_measurements_results(self, experiment, rep, pose, reward_vec, control_vec, metList):
         """
         Method to record the measurements, sensors,
         controls and status of the entire benchmark.
@@ -167,7 +172,11 @@ class Recording(object):
                     i].throttle
                 self._dict_measurements['brake'] = control_vec[
                     i].brake
-
+                self._dict_measurements['centerDist'] = metList[i]['centerDist']
+                self._dict_measurements['long_accel'] = metList[i]['long_accel']
+                self._dict_measurements['lat_accel'] = metList[i]['lat_accel']
+                self._dict_measurements['direction'] = metList[i]['direction']
+                self._dict_measurements['gametimeStamp'] = metList[i]['game_timestamp']
                 mw.writerow(self._dict_measurements)
 
     def _create_log_files(self):

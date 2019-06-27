@@ -1,136 +1,175 @@
-from model_functions import *
 import numpy as np
-import os
+import os, sys
 from PIL import Image
+import json
+import torch
+from torchvision import transforms
+from torch.autograd import Variable
+from .net import get_model
 
-# the outputs of the network are normalized to a range of -1 to 1
-# therefore we need to multiply it by the normalization constants
-# (which where calculated on the training set)
-NORM_DICT = {'center_distance': 1.6511945645500001,
-             'veh_distance': 50.0,
-             'relative_angle': 0.759452569632}
-             
-# set up for the model rebuild
-last_layer_keys = ['0_red_light', '1_hazard_stop', '2_speed_sign',\
-                   '3_relative_angle', '4_center_distance', '5_veh_distance']
-[RED_LIGHT, HAZARD_STOP, SPEED_SIGN, RELATIVE_ANGLE, CENTER_DISTANCE, VEH_DISTANCE] = last_layer_keys
+#import imgaug as ia
+#import imgaug.augmenters as iaa
 
-class ModelSingle(object):
-    def __init__(self):
-        print("Building model.")
-        tup = reload_model_from_episode('full_model_ep_3936')
-        self.model = tup[0]   
-        self.max_input_shape = self.model.input_shape[0][1]
-        
-    def predict(self, im, meta):
-        preds = self.model.predict([im] + meta, batch_size=1, verbose=0)  
-        return preds      
-               
-class TaskBlockEnsemble(object):
-     """
-     enhance the predictions of the main model with the prediction
-     of the specialized task block models
-     """
-     def __init__(self):
-        print("Building model 1.")
-        self.model1 = reload_model_from_episode('full_model_ep_3936')[0]
-        self.inp_shape1 = self.model1.input_shape[0][1]
-        
-        print("Building model 2: red light")
-        self.model2 = reload_model_from_episode(RED_LIGHT)[0] 
-        self.inp_shape2 = self.model2.input_shape[0][1]
-        
-        print("Building model 3: hazard stop") 
-        self.model3 = reload_model_from_episode(HAZARD_STOP)[0]     
-        self.inp_shape3 = self.model3.input_shape[0][1]    
-        
-        print("Building model 4: relative angle")
-        self.model4 = reload_model_from_episode(RELATIVE_ANGLE)[0] 
-        self.inp_shape4 = self.model4.input_shape[0][1]
-        
-        # get input shape
-        self.max_input_shape = self.inp_shape1
-        
-     def predict(self, im, meta):
-        preds1 = self.model1.predict([im] + meta, batch_size=1, verbose=0)
-        # the sequence is 14 frames long (= max input shape)
-        # to use the task block models, the input sequence needs to be adjusted accordingly
-        preds2 = self.model2.predict([im[:,(14 - self.inp_shape2):,:,:,:]] + meta, batch_size=1, verbose=0)
-        preds3 = self.model3.predict([im[:,(14 - self.inp_shape3):,:,:,:]] + meta, batch_size=1, verbose=0)
-        preds4 = self.model4.predict([im[:,(14 - self.inp_shape4):,:,:,:]] + meta, batch_size=1, verbose=0)
+BASE_PATH = os.path.abspath(os.path.join('.', '.'))
+MODEL_PATH = BASE_PATH + "/agents/CAL_agent/perception/model_data/models/"
 
-        preds = []
-        # average the prediction of all 6 affordances
-        # speed sign and veh_distance do not need an additional 
-        # prediction -> reduces the comp. overhead
-        preds.append((preds1[0] + preds2[0])/2)
-        preds.append((preds1[1] + preds3[1])/2)
-        preds.append(preds1[2])
-        preds.append((preds1[3] + preds4[3])/2)
-        preds.append((preds1[4] + preds4[4])/2)    
-        preds.append(preds1[5])
+# classes of the categorical affordances
+CAT_DICT = {
+    'red_light': [False, True],
+    'hazard_stop': [False, True],
+    'speed_sign': [-1, 30, 60, 90],
+}
 
-        return preds
+# normalizing constants of the continuous affordances
+REG_DICT = {
+    'center_distance': 1.6511945645500001,
+    'veh_distance': 50.0,
+    'relative_angle': 0.759452569632
+}
+
+
+def get_augmentations():
+    # applies the given augmenter in 50% of all cases,
+    sometimes = lambda aug: iaa.Sometimes(0.5, aug)
+
+    # Define our sequence of augmentation steps that will be applied to every image
+    seq = iaa.Sequential([
+            # execute 0 to 5 of the following (less important) augmenters per image
+            iaa.SomeOf((0, 5),
+                [
+                    iaa.OneOf([
+                        iaa.GaussianBlur((0, 3.0)),
+                        iaa.AverageBlur(k=(2, 7)), 
+                        iaa.MedianBlur(k=(3, 11)),
+                    ]),
+                    iaa.Sharpen(alpha=(0, 1.0), lightness=(0.75, 1.5)),
+                    iaa.Emboss(alpha=(0, 1.0), strength=(0, 2.0)), 
+                    # search either for all edges or for directed edges,
+                    # blend the result with the original image using a blobby mask
+                    iaa.SimplexNoiseAlpha(iaa.OneOf([
+                        iaa.EdgeDetect(alpha=(0.5, 1.0)),
+                        iaa.DirectedEdgeDetect(alpha=(0.5, 1.0), direction=(0.0, 1.0)),
+                    ])),
+                    iaa.AdditiveGaussianNoise(loc=0, scale=(0.0, 0.05*255), per_channel=0.5),
+                    iaa.OneOf([
+                        iaa.Dropout((0.01, 0.1), per_channel=0.5), # randomly remove up to 10% of the pixels
+                        iaa.CoarseDropout((0.03, 0.15), size_percent=(0.02, 0.05), per_channel=0.2),
+                    ]),
+                    iaa.Add((-10, 10), per_channel=0.5), # change brightness of images (by -10 to 10 of original value)
+                    iaa.AddToHueAndSaturation((-20, 20)), # change hue and saturation
+                    # either change the brightness of the whole image (sometimes
+                    # per channel) or change the brightness of subareas
+                    iaa.OneOf([
+                        iaa.Multiply((0.5, 1.5), per_channel=0.5),
+                        iaa.FrequencyNoiseAlpha(
+                            exponent=(-4, 0),
+                            first=iaa.Multiply((0.5, 1.5), per_channel=True),
+                            second=iaa.ContrastNormalization((0.5, 2.0))
+                        )
+                    ]),
+                    iaa.ContrastNormalization((0.5, 2.0), per_channel=0.5), # improve or worsen the contrast
+                    sometimes(iaa.ElasticTransformation(alpha=(0.5, 3.5), sigma=0.25)), # move pixels locally around (with random strengths)
+                ],
+                random_order=True
+            )
+        ],
+        random_order=True
+    )
+    return seq
+
+
+
+
+
+
+
+
+
+### helper functions
+
+def load_json(path):
+    with open(path + '.json', 'r') as json_file:
+        f = json.load(json_file)
+    return f
+
+def to_np(t):
+    return np.array(t.data.cpu())
+
+def softmax(x):
+    #return np.exp(x)/sum(np.exp(x))
+    e_x = np.exp(x - np.max(x))
+    return e_x / e_x.sum()
+
+### data transforms
+
+class Rescale(object):
+    def __init__(self, scalar):
+        self.scalar = scalar
+
+    def __call__(self, im):
+        w, h = [int(s*self.scalar) for s in im.size]
+        return transforms.Resize((h, w))(im)
+
+class Crop(object):
+    def __init__(self, box):
+        assert len(box) == 4
+        self.box = box
+
+    def __call__(self, im):
+        return im.crop(self.box)
+
+
+def get_transform():
+    return transforms.Compose([
+        Crop((0, 120, 800, 480)),
+        Rescale(0.4),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406],[0.229, 0.224, 0.225])
+    ])
+
+### network
 
 class CAL_network(object):
-    def __init__(self, ensemble=False):
-        front_model, _, preprocessing = get_conv_model()
-        self.conv_model = front_model
-        self.preprocessing = preprocessing     
-        if ensemble:   
-            self.model = TaskBlockEnsemble()
-        else:
-            self.model = ModelSingle()        
+    def __init__(self, name='gru'):
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self._transform = get_transform()
 
-    def predict(self, im, meta):
-        """ 
-        input: transformed image, meta input(i.e. direction) as a list
-        Returns the predictions dictionary
-        """
-        if not isinstance(meta, list):
-            raise TypeError('Meta needs to be a list')
+        # get the model
+        params = load_json(MODEL_PATH + "params")
+        self.model, _ = get_model(params)
+        self.model.load_state_dict(torch.load(MODEL_PATH + "test.pth"))
+        self.model.eval().to(self.device);
 
-        prediction = {}
-        meta = [np.array([meta[i]]) for i in range(len(meta))]
+    def predict(self, sequence, direction):
+        print('cal_network sequence',len(sequence))
+        #print(torch.cat(sequence).size())
+        inputs = {
+            'sequence': torch.cat(sequence).unsqueeze(0).to(self.device),
+            'direction': torch.Tensor([direction]).to(dtype=torch.int),
+        }
 
-        # predict the classes and the probabilites of the validation set
-        preds = self.model.predict(im, meta)
+        preds = self.model(inputs)
+        preds = {k: to_np(v) for k,v in preds.items()}
+        #print("before cat",preds)
+        out = {}
+        out.update({k: self.cat_process(k, preds[k]) for k in CAT_DICT})
+        out.update({k: self.reg_process(k, preds[k]) for k in REG_DICT})
+        return out
 
-        # CLASSIFICATION
-        classification_labels = ['red_light', 'hazard_stop', 'speed_sign']
-        classes = [[False, True],[False, True],[-1, 30, 60, 90]]
-        for i, k in enumerate(classification_labels):
-            prediction[k] = self.labels2classes(preds[i], classes[i])
+    def preprocess(self, arr):
+        im = self._transform(Image.fromarray(arr))
+        return im.unsqueeze(0)
 
-        # REGRESSION
-        regression_labels = ['relative_angle', 'center_distance', 'veh_distance']
-        for i, k in enumerate(regression_labels):
-            prediction[k] = preds[i+len(classification_labels)][0][0]
-            prediction[k] = np.clip(prediction[k],-1,1)
-            # undo normalization
-            prediction[k] = prediction[k]*NORM_DICT[k]
+    @staticmethod
+    def cat_process(cl, arr):
+        arr=softmax(arr)
+        max_idx = np.argmax(arr)
+        pred_class = CAT_DICT[cl][max_idx]
+        pred_prob = np.max(arr)
+        print("probability:",pred_prob)
+        return (pred_class, pred_prob)
 
-        return prediction
-
-    def preprocess_image(self, im, sequence=False):
-        im = Image.fromarray(im)
-        im = im.crop((0,120,800,480)).resize((222,100))
-        
-        # reshape and resize the image
-        x = np.asarray(im, dtype=K.floatx())
-        x = np.expand_dims(x,0)
-        # preprocess image
-        x = self.preprocessing(x)
-        x = self.conv_model.predict(x, batch_size=1, verbose=0)
-
-        if sequence: x = np.expand_dims(x,1)
-        return x
-
-    def labels2classes(self, prediction, c):
-        # turns predicted probs to onehot idcs predictions
-        # returns a tuple oft the predicted class and its probability
-        # == predict classes
-        max_idx = np.argmax(prediction)
-        predicted_class = c[max_idx]
-        predicted_proba = np.max(prediction)
-        return (predicted_class, predicted_proba)
+    @staticmethod
+    def reg_process(cl, arr):
+        arr = np.clip(arr, -1, 1)
+        return arr*REG_DICT[cl]

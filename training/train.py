@@ -4,18 +4,20 @@ import torch.nn.functional as F
 import os, copy, time
 from tqdm import tqdm
 from ipdb import set_trace
-#data_path = '/home/vasu/Desktop/project/'
+root_dir = '/content/drive/My Drive/training/key_frames_presentation/CameraRGB/'
+data_path = '/content/drive/My Drive/training/key_frames_presentation/CameraRGB/'
+
 ### helper functions
 
 def to_np(t):
-    return np.array(t.cpu())
+    return np.array(t.cpu()) # returning the npy array
 
 ### Losses
 
 def calc_class_weight(x, fac=2):
     """calculate inverse normalized count, multiply by given factor"""
-    _, counts = np.unique(x, return_counts=True)
-    tmp = 1/counts/sum(counts)
+    _, counts = np.unique(x, return_counts=True) #calculating the number of times unique itme appear in the array
+    tmp = 1/counts/sum(counts) #calculating average
     tmp /= max(tmp)
     return tmp*fac
 
@@ -31,14 +33,23 @@ def get_class_weights():
        'veh_distance': torch.Tensor([1]),
     }
 
-WEIGHTS = {
-    'red_light': torch.Tensor([0.1109, 10.0]),
-    'hazard_stop': torch.Tensor([0.0266, 2.0]),
-    'speed_sign': torch.Tensor([0.0203, 0.8945, 1.8224, 2.0]),
-    'relative_angle': torch.Tensor([1]),
-    'center_distance': torch.Tensor([1]),
-    'veh_distance': torch.Tensor([1]),
-}
+WEIGHTS = {'red_light': torch.Tensor([1.4322, 2.0000]),
+           'hazard_stop': torch.Tensor([0.0050, 2.0000]),
+           'speed_sign': torch.Tensor([0.0000, 0.0089, 2.0000, 1.3333]),
+           'relative_angle': torch.Tensor([1]),
+           'center_distance': torch.Tensor([1]),
+           'veh_distance': torch.Tensor([1]),
+          }
+
+#WEIGHTS = {
+#    'red_light': torch.Tensor([2.0000]),
+#    'hazard_stop': torch.Tensor([2.0000]),
+#    'speed_sign': torch.Tensor([2.0]),
+#    'relative_angle': torch.Tensor([1]),
+#    'center_distance': torch.Tensor([1]),
+#    'veh_distance': torch.Tensor([1]),
+#}
+
 
 def WCE(x, y, w):
     """weighted mean average"""
@@ -48,7 +59,7 @@ def WCE(x, y, w):
 def MAE(x, y, w):
     return F.l1_loss(x.squeeze(), y)*w
 
-def custom_loss(y_pred, y_true, dev='cpu'):
+def custom_loss(y_pred, y_true, dev='cuda'):
     loss = torch.Tensor([0]).to(dev)
     for k in y_pred:
         func = MAE if y_pred[k].shape[1]==1 else WCE
@@ -72,6 +83,7 @@ def train(model, data_loader, loss_func, opt):
     device = next(model.parameters()).device
     for inputs, labels in tqdm(data_loader):
         inputs['sequence'] = inputs['sequence'].to(device)
+        #inputs = inputs.unsqueeze(0)
         preds = model(inputs)
         labels = {k: v.to(device) for k,v in labels.items()}
         loss_batch(model, loss_func, preds=preds, labels=labels, opt=opt)
@@ -103,29 +115,47 @@ def validate(model, data_loader, loss_func):
 
     return val_loss, all_preds, all_labels
 
-def fit(epochs, model, loss_func, opt, train_dl, valid_dl, dev='cpu', val_hist=None):
+def fit(epochs, model, loss_func, opt, train_dl, valid_dl, dev='cuda', val_hist=None):
     since = time.time()
 
     val_hist = [] if val_hist is None else val_hist
     best_model_wts = copy.deepcopy(model.state_dict())
     best_val_loss = np.inf if not val_hist else min(val_hist)
-
+    flag = 0
+    a = []
+    e = 0
     for epoch in range(epochs):
         model.train()
         model = train(model, train_dl, loss_func, opt)
         model.eval()
         val_loss, _, _ = validate(model, valid_dl, loss_func)
+        print("\n")
         val_hist.append(val_loss)
+        print("\n")
+        print("No. of epoch is completed: ",(epoch+1),"\n")
+        
+        a.append(model)
+        e = e + 1
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            PATH = f"./models/{model.params.name}.pth"
+            PATH = f"./models/nsd/{model.params.name}.pth"
             torch.save(model.state_dict(), PATH)
             best_model_wts = copy.deepcopy(model.state_dict())
+            print("The best val loss is decreased in this epoch", "\n")
+            
+            flag = epoch+1
+
+        print("The best val loss is till now: ", best_val_loss, "\n")
+
+
+        #print(a)
+        #print(e)
 
     time_elapsed = time.time() - since
     print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
     print('Best val loss: {:4f}'.format(best_val_loss))
+    print('Best val loss achieved in the epoch: ', flag)
 
     # load best model weights
     model.load_state_dict(best_model_wts)
