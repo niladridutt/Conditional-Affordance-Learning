@@ -1,7 +1,14 @@
 ## Conditional Affordance Learning  ##
 #### Initial code : https://github.com/xl-sr/CAL
-#### Reference [[Paper]](https://arxiv.org/abs/1806.06498) [[Video]](https://www.youtube.com/watch?v=UtUbpigMgr0) [[Talk]](https://www.youtube.com/watch?v=SceH3Al9w_M)
+#### Reference [[Paper]](https://arxiv.org/abs/1806.06498)
 
+Our model uses concatenated images to give us a wider receptive field and also performs considerably well on a reduced dataset by performing key frame extraction.
+
+Find more about our work in our [presentation](CARLA_0.8.2_presentation.pdf)
+
+<p align="center">
+  <img src="CAL.gif" width="480">
+</p>
 
 ### Installation
 
